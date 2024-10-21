@@ -6,10 +6,10 @@ const hfTOKEN = process.env.HF_TOKEN;
 const embeddingUrl =
   "https://api-inference.huggingface.co/models/sentence-transformers/all-MiniLM-L6-v2";
 
-// Connect to the database
+// Connect to the sample_mflix database
 mongoose
   .connect(process.env.MONGODB_URL, {
-    dbName: "echelon-ecommerce-db",
+    dbName: "sample_mflix", // Use the sample_mflix database
   })
   .then(() => console.log("Database Connected"))
   .catch((err) => console.log("Database not connected", err));
@@ -26,8 +26,8 @@ const movieSchema = new Schema({
   },
 });
 
-// Create a Movie model
-const Movie = mongoose.model("Movie", movieSchema);
+// Ensure the collection name is explicitly set to 'movies'
+const Movie = mongoose.model("Movie", movieSchema, "movies");
 
 // Function to create embeddings for a movie
 const createEmbedding = async (text) => {
@@ -73,13 +73,18 @@ const createVectorIndex = async () => {
 const searchMovies = async (queryText) => {
   const queryEmbedding = await createEmbedding(queryText); // Create embedding for the query text
 
+  if (!queryEmbedding) {
+    console.error("Embedding not generated, cannot perform search.");
+    return;
+  }
+
   const results = await Movie.aggregate([
     {
       $search: {
         index: "default", // Specify the vector index
         knnBeta: {
-          vector: queryEmbedding,
-          path: "embeddings",
+          vector: queryEmbedding, // The generated embedding vector
+          path: "embeddings", // The path to the embeddings field in your documents
           k: 5, // Return top 5 nearest neighbors
         },
       },
@@ -90,10 +95,15 @@ const searchMovies = async (queryText) => {
 };
 
 // Example: Call this function to store a new movie with embeddings
-// storeMovieWithEmbedding("Interstellar", "A sci-fi movie about space travel and time", ["Sci-Fi", "Adventure"], 2014);
+// storeMovieWithEmbedding(
+//   "Interstellar",
+//   "A sci-fi movie about space travel and time",
+//   ["Sci-Fi", "Adventure"],
+//   2014
+// );
 
 // Example: Call this function to create vector index
 // createVectorIndex();
 
 // Example: Searching for a movie similar to the query text
-// searchMovies("A sci-fi movie with a futuristic space adventure");
+searchMovies("A sci-fi movie with a futuristic space adventure");
