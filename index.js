@@ -106,4 +106,4 @@ const searchMovies = async (queryText) => {
 // createVectorIndex();
 
 // Example: Searching for a movie similar to the query text
-searchMovies("A sci-fi movie with a futuristic space adventure");
+//searchMovies("A sci-fi movie with a futuristic space adventure");
