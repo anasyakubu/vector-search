@@ -7,17 +7,25 @@ const path = require("path");
 const mongoose = require("mongoose");
 const { HfInference } = require("@huggingface/inference");
 
+// Check if necessary environment variables are loaded
+if (!process.env.HUGGINGFACE_API_KEY || !process.env.MONGODB_URL) {
+  console.error(
+    "Please set the HUGGINGFACE_API_KEY and MONGODB_URL in your .env file"
+  );
+  process.exit(1);
+}
+
 // Initialize Hugging Face API
 const hf = new HfInference(process.env.HUGGINGFACE_API_KEY);
 
 // Connect to MongoDB
 mongoose
-  .connect(process.env.MONGODB_URI, {
+  .connect(process.env.MONGODB_URL, {
     useNewUrlParser: true,
     useUnifiedTopology: true,
   })
   .then(() => console.log("MongoDB connected"))
-  .catch((err) => console.log(err));
+  .catch((err) => console.log("MongoDB connection error:", err));
 
 // Create a schema for embeddings
 const embeddingSchema = new mongoose.Schema({
@@ -31,13 +39,20 @@ const Embedding = mongoose.model("Embedding", embeddingSchema);
 const app = express();
 app.use(express.json());
 
+// Ensure 'uploads' directory exists
+const uploadDir = path.join(__dirname, "uploads");
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir, { recursive: true });
+}
+
 // Configure Multer for file uploads
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    cb(null, "uploads/");
+    cb(null, uploadDir); // Save files to 'uploads/' directory
   },
   filename: (req, file, cb) => {
-    cb(null, file.originalname);
+    console.log(`Uploading file: ${file.originalname}`);
+    cb(null, file.originalname); // Keep the original filename
   },
 });
 
@@ -46,7 +61,15 @@ const upload = multer({ storage });
 // Endpoint to upload PDF and process it
 app.post("/upload", upload.single("file"), async (req, res) => {
   try {
-    const filePath = path.join(__dirname, "uploads", req.file.filename);
+    // Check if a file is uploaded
+    if (!req.file) {
+      console.log("No file uploaded");
+      return res.status(400).json({ message: "No file uploaded" });
+    }
+
+    console.log("File uploaded successfully:", req.file);
+
+    const filePath = path.join(uploadDir, req.file.filename);
 
     // Extract text from the PDF
     const dataBuffer = fs.readFileSync(filePath);
@@ -56,7 +79,7 @@ app.post("/upload", upload.single("file"), async (req, res) => {
     // Remove the file after processing
     fs.unlinkSync(filePath);
 
-    // Generate embeddings for the extracted text
+    // Generate embeddings for the extracted text using Hugging Face
     const embeddings = await hf.featureExtraction({
       model: "sentence-transformers/all-MiniLM-L6-v2",
       inputs: extractedText,
@@ -71,7 +94,15 @@ app.post("/upload", upload.single("file"), async (req, res) => {
 
     res.status(201).json({ message: "Embedding saved successfully" });
   } catch (error) {
-    console.error(error);
+    console.error("Error:", error);
+
+    // Handle Multer-specific errors
+    if (error instanceof multer.MulterError) {
+      return res
+        .status(400)
+        .json({ message: `Multer error: ${error.message}` });
+    }
+
     res.status(500).json({ message: "Error processing the PDF" });
   }
 });
@@ -80,6 +111,11 @@ app.post("/upload", upload.single("file"), async (req, res) => {
 app.post("/query", async (req, res) => {
   try {
     const { queryText } = req.body;
+
+    // Check if the query text is provided
+    if (!queryText) {
+      return res.status(400).json({ message: "Query text is required" });
+    }
 
     // Generate embedding for the query
     const queryEmbedding = await hf.featureExtraction({
@@ -101,11 +137,13 @@ app.post("/query", async (req, res) => {
     });
 
     res.json({
-      message: `Closest match for your query: ${bestMatch.documentName}`,
+      message: bestMatch
+        ? `Closest match for your query: ${bestMatch.documentName}`
+        : "No match found",
       similarity: highestSimilarity,
     });
   } catch (error) {
-    console.error(error);
+    console.error("Error:", error);
     res.status(500).json({ message: "Error processing query" });
   }
 });
@@ -119,5 +157,5 @@ function cosineSimilarity(vecA, vecB) {
 }
 
 // Start the server
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 8000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
