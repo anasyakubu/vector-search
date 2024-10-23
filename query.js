@@ -4,14 +4,18 @@ const multer = require("multer");
 const pdfParse = require("pdf-parse");
 const fs = require("fs");
 const path = require("path");
-const { OpenAI } = require("openai");
 const mongoose = require("mongoose");
 const { HfInference } = require("@huggingface/inference");
+const { OpenAI } = require("openai");
 
 // Check if necessary environment variables are loaded
-if (!process.env.HUGGINGFACE_API_KEY || !process.env.MONGODB_URL) {
+if (
+  !process.env.HUGGINGFACE_API_KEY ||
+  !process.env.MONGODB_URL ||
+  !process.env.OPENAI_API_KEY
+) {
   console.error(
-    "Please set the HUGGINGFACE_API_KEY and MONGODB_URL in your .env file"
+    "Please set the HUGGINGFACE_API_KEY, MONGODB_URL, and OPENAI_API_KEY in your .env file"
   );
   process.exit(1);
 }
@@ -35,6 +39,7 @@ mongoose
 const embeddingSchema = new mongoose.Schema({
   documentName: String,
   embedding: [Number], // Store the embedding as an array of numbers
+  content: String, // Store the extracted text content
 });
 
 const Embedding = mongoose.model("Embedding", embeddingSchema);
@@ -80,38 +85,37 @@ app.post("/upload", upload.single("file"), async (req, res) => {
     const pdfData = await pdfParse(dataBuffer);
     const extractedText = pdfData.text;
 
+    // Remove the file after processing
+    fs.unlinkSync(filePath);
+
     // Generate embeddings for the extracted text using Hugging Face
     const embeddings = await hf.featureExtraction({
       model: "sentence-transformers/all-MiniLM-L6-v2",
       inputs: extractedText,
     });
 
-    // Save the embeddings to MongoDB
+    // Save the embeddings and extracted text to MongoDB
     const newEmbedding = new Embedding({
       documentName: req.file.filename,
       embedding: embeddings[0], // Save the first embedding from the array
+      content: extractedText, // Save the extracted text content
     });
     await newEmbedding.save();
-
-    // Remove the file after processing
-    fs.unlinkSync(filePath);
 
     res.status(201).json({ message: "Embedding saved successfully" });
   } catch (error) {
     console.error("Error:", error);
-
     // Handle Multer-specific errors
     if (error instanceof multer.MulterError) {
       return res
         .status(400)
         .json({ message: `Multer error: ${error.message}` });
     }
-
     res.status(500).json({ message: "Error processing the PDF" });
   }
 });
 
-// Endpoint to query the embeddings
+// Endpoint to query the embeddings and OpenAI
 app.post("/query", async (req, res) => {
   try {
     const { queryText } = req.body;
@@ -127,60 +131,42 @@ app.post("/query", async (req, res) => {
       inputs: queryText,
     });
 
-    // Perform a simple nearest neighbor search (for demonstration purposes)
+    // Perform a simple nearest neighbor search
     const allEmbeddings = await Embedding.find();
     let bestMatch = null;
     let highestSimilarity = -Infinity;
 
     allEmbeddings.forEach((doc) => {
-      // Ensure both embeddings are arrays
-      const docEmbedding = Array.isArray(doc.embedding) ? doc.embedding : [];
-      const queryEmb = Array.isArray(queryEmbedding[0])
-        ? queryEmbedding[0]
-        : [];
-
-      if (docEmbedding.length && queryEmb.length) {
-        const similarity = cosineSimilarity(queryEmb, docEmbedding);
-        if (similarity > highestSimilarity) {
-          highestSimilarity = similarity;
-          bestMatch = doc;
-        }
+      const similarity = cosineSimilarity(queryEmbedding[0], doc.embedding);
+      if (similarity > highestSimilarity) {
+        highestSimilarity = similarity;
+        bestMatch = doc;
       }
     });
 
-    res.json({
-      message: bestMatch
-        ? `Closest match for your query: ${bestMatch.documentName}`
-        : "No match found",
-      similarity: highestSimilarity,
-    });
+    // If a match is found, send the content to OpenAI
+    if (bestMatch) {
+      const openAiResponse = await openai.chat.completions.create({
+        model: "gpt-3.5-turbo", // Specify your model here
+        messages: [
+          {
+            role: "user",
+            content: `Based on the document: ${bestMatch.content}, ${queryText}`,
+          },
+        ],
+      });
+
+      res.json({
+        message: `Closest match for your query: ${bestMatch.documentName}`,
+        response: openAiResponse.choices[0].message.content,
+        similarity: highestSimilarity,
+      });
+    } else {
+      res.json({ message: "No match found", similarity: highestSimilarity });
+    }
   } catch (error) {
     console.error("Error:", error);
     res.status(500).json({ message: "Error processing query" });
-  }
-});
-
-// New endpoint to query OpenAI
-app.post("/openai-query", async (req, res) => {
-  const { prompt } = req.body;
-
-  // Check if the prompt is provided
-  if (!prompt) {
-    return res.status(400).json({ message: "Prompt is required" });
-  }
-
-  try {
-    const response = await openai.chat.completions.create({
-      model: "gpt-3.5-turbo", // Specify your model here
-      messages: [{ role: "user", content: prompt }],
-    });
-
-    res.json({
-      message: response.choices[0].message.content,
-    });
-  } catch (error) {
-    console.error("OpenAI Error:", error);
-    res.status(500).json({ message: "Error querying OpenAI" });
   }
 });
 
